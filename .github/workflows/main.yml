@@ -1,38 +1,42 @@
 name: Build Linux Packages (pnpm)
 
 on:
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:  # 支持手动触发构建
   push:
     tags:
-      - 'v*'  # 当推送v开头的标签时触发
+      - 'v*'  # 推送v开头标签（如v1.0.0）时自动触发
 
 jobs:
   build-linux:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30  # 设置超时时间
+    timeout-minutes: 30  # 防止构建超时
 
     steps:
+      # 1. 拉取代码
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 拉取完整历史，确保版本号正确
+          fetch-depth: 0  # 拉取完整历史，确保版本计算正确
 
+      # 2. 安装Node.js（仅安装Node，不提前处理pnpm缓存）
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: 'pnpm'  # 启用pnpm缓存
+          node-version: 20  # 匹配项目Node版本
 
+      # 3. 手动安装pnpm（关键步骤：确保pnpm加入PATH）
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
-          run_install: false
+          version: 9  # 明确pnpm版本，避免兼容性问题
+          run_install: false  # 后续手动安装依赖，更可控
 
+      # 4. 获取pnpm缓存路径
       - name: Get pnpm store directory
         id: pnpm-cache
         run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
 
+      # 5. 配置pnpm依赖缓存（加速后续安装）
       - name: Setup pnpm cache
         uses: actions/cache@v4
         with:
@@ -41,36 +45,40 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pnpm-store-
 
+      # 6. 安装项目依赖
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile  # 严格按lock文件安装，保证一致性
         env:
-          CI: true  # 标记为CI环境，可能影响某些依赖安装
+          CI: true  # 标记CI环境，优化依赖安装逻辑
 
+      # 7. 安装arm64交叉编译工具（确保arm64架构构建成功）
       - name: Install cross-compilation tools
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          # 验证安装
-          aarch64-linux-gnu-gcc --version
+          aarch64-linux-gnu-gcc --version  # 验证工具安装成功
 
+      # 8. 构建项目源码
       - name: Build application
         run: pnpm run build
         env:
-          NODE_ENV: production
+          NODE_ENV: production  # 生产环境构建，优化代码
 
-      - name: Build Linux packages (x64 + arm64)
+      # 9. 构建Linux安装包（x64+arm64，指定输出到release目录）
+      - name: Build Linux packages
         run: pnpm exec electron-builder --linux
         env:
-          ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: false
-          ELECTRON_BUILDER_FORCE_UNSAFE_ASAR_EXTRACTION: false
+          ELECTRON_BUILDER_OUT_DIR: release  # 强制输出到release目录，与日志对齐
 
-      - name: Debug - List release directory
+      # 10. 调试：查看release目录内容（确认文件存在）
+      - name: Debug - List release files
         run: |
-          echo "Contents of release directory:"
+          echo "=== Release directory contents ==="
           ls -la release/
-          echo "Full file paths:"
-          find release/ -type f
+          echo "=== Full paths of generated files ==="
+          find release/ -type f  # 列出所有文件，确认deb和AppImage存在
 
+      # 11. 上传构建产物
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -78,21 +86,24 @@ jobs:
           path: |
             release/*.deb
             release/*.AppImage
-          if-no-files-found: error
-          retention-days: 14  #  artifacts保留14天
+          if-no-files-found: error  # 找不到文件时直接报错，不隐藏问题
+          retention-days: 14  # 产物保留14天
 
+      # 12. 自动创建GitHub Release（仅标签推送时触发）
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ github.ref_name }}
           body: |
-            ## Release ${{ github.ref_name }}
-            Linux builds for x64 and arm64 architectures.
+            ## ${{ github.ref_name }}
+            - 支持架构：x64（amd64）、arm64
+            - 安装包格式：deb（Debian/Ubuntu）、AppImage（通用Linux）
+            - 基于Electron v38.1.2构建
           files: |
             release/*.deb
             release/*.AppImage
           draft: false
           prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 自动获取仓库权限
